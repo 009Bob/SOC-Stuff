@@ -1,0 +1,85 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time  # Import time for pausing execution
+
+# Set up WebDriver
+s = Service(r'C:\Users\travi\OneDrive\Desktop\chromedriver.exe')
+driver = webdriver.Chrome(service=s)
+driver.get('https://apackets.com/upload')
+
+# Locate the drag-and-drop area
+drop_area = driver.find_element(By.ID, 'drop-area')
+
+# Path to the file you want to upload
+file_path = r"C:\Users\travi\OneDrive\Desktop\smallFlows.pcap"
+
+# JavaScript to simulate file drop
+js_script = """
+var target = arguments[0],
+    offsetX = arguments[1],
+    offsetY = arguments[2],
+    document = target.ownerDocument || document,
+    window = document.defaultView || window;
+
+var input = document.createElement('INPUT');
+input.type = 'file';
+input.onchange = function () {
+  var rect = target.getBoundingClientRect(),
+      x = rect.left + (offsetX || (rect.width >> 1)),
+      y = rect.top + (offsetY || (rect.height >> 1)),
+      dataTransfer = { files: this.files };
+
+  ['dragenter', 'dragover', 'drop'].forEach(function (name) {
+    var evt = document.createEvent('MouseEvent');
+    evt.initMouseEvent(name, true, true, window, 0, 0, 0, x, y, false, false, false, false, 0, null);
+    evt.dataTransfer = dataTransfer;
+    target.dispatchEvent(evt);
+  });
+
+  setTimeout(function () { document.body.removeChild(input); }, 25);
+};
+document.body.appendChild(input);
+return input;
+"""
+
+# Execute script to create file input and perform drop
+file_input = driver.execute_script(js_script, drop_area)
+file_input.send_keys(file_path)
+time.sleep(40)
+# Wait for the response element to become visible
+try:
+    response_element = WebDriverWait(driver, 30).until(
+        EC.visibility_of_element_located((By.ID, 'msg-response'))
+    )
+
+    # Check if the response element indicates success
+    if "completed" in response_element.text:
+        print("Upload successful! Message:", response_element.text)
+
+        # Wait for 10 seconds before clicking the link
+        print("Waiting for 10 seconds before navigating to the report page.")
+        time.sleep(10)
+
+        # Locate and click the 'view report' link by searching for specific href attributes
+        view_report_link = response_element.find_element(By.XPATH,
+                                                         "//a[contains(@href, 'pcaps?pcap=') and contains(@href, 'view=charts')]")
+        view_report_link.click()
+        print("Navigated to report page.")
+
+        # Wait for some element on the report page to ensure it has loaded
+        WebDriverWait(driver, 20).until(
+            EC.visibility_of_element_located((By.ID, 'someElementOnReportPage'))
+        )
+        print("Report page has loaded.")
+    else:
+        print("Upload might not have been successful. Check the response message.")
+except Exception as e:
+    print("Error during upload or while waiting for the response:", e)
+
+# Keep the browser open in all cases
+print("Keeping the browser open for manual inspection.")
+input("Press Enter to exit...")  # Pause the script until you press Enter in the console
+# driver.quit()  # Ensure this line is commented out or removed
