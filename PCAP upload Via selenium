@@ -6,7 +6,7 @@ from selenium.webdriver.support import expected_conditions as EC
 import time  # Import time for pausing execution
 
 # Set up WebDriver
-s = Service(r'C:\Users\travi\OneDrive\Desktop\chromedriver.exe')
+s = Service(r'C:\[PathToChromeDriver]\chromedriver.exe')
 driver = webdriver.Chrome(service=s)
 driver.get('https://apackets.com/upload')
 
@@ -14,7 +14,7 @@ driver.get('https://apackets.com/upload')
 drop_area = driver.find_element(By.ID, 'drop-area')
 
 # Path to the file you want to upload
-file_path = r"C:\Users\travi\OneDrive\Desktop\smallFlows.pcap"
+file_path = r"[LocationOf].pcap"
 
 # JavaScript to simulate file drop
 js_script = """
