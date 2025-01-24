@@ -1,0 +1,503 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_SHT4x.h>
+#include <Adafruit_BME280.h>
+
+// -----------------------------
+// OLED Display Settings
+// -----------------------------
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET     -1
+#define SCREEN_ADDRESS 0x3C ///< Change to 0x3D for some OLEDs
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// -----------------------------
+// SHT40 Sensor Settings
+// -----------------------------
+Adafruit_SHT4x sht4 = Adafruit_SHT4x();
+
+// -----------------------------
+// BME280 Sensor Settings
+// -----------------------------
+Adafruit_BME280 bme;
+
+// -----------------------------
+// UV Sensor Settings
+// -----------------------------
+#define UV_SENSOR_PIN     A0 // Analog pin connected to UV sensor's VOUT
+
+// -----------------------------
+// Joystick Settings
+// -----------------------------
+#define JOYSTICK_X_PIN    A1 // Analog pin connected to Joystick X-axis
+#define JOYSTICK_Y_PIN    A2 // Analog pin connected to Joystick Y-axis
+#define JOYSTICK_SW_PIN   2  // Digital pin connected to Joystick Switch
+
+// -----------------------------
+// Geiger Counter Settings
+// -----------------------------
+#define GEIGER_PIN        3  // Digital pin connected to Geiger pulse output
+volatile unsigned long geigerCounts = 0;
+unsigned long lastGeigerCountTime = 0;
+const unsigned long geigerInterval = 10000; // 10 seconds
+float cps = 0.0;
+float uSv = 0.0;
+
+// -----------------------------
+// LED Settings
+// -----------------------------
+#define LED_COUNT 10
+const uint8_t ledPins[LED_COUNT] = {4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+
+// -----------------------------
+// Initialization Flags
+// -----------------------------
+bool displayInitialized = false;
+bool sht40Initialized = false;
+bool bmeInitialized = false;
+
+// -----------------------------
+// Error Handling (Simplified)
+#define MAX_ERRORS 2
+const __FlashStringHelper* errorMessages[MAX_ERRORS];
+int errorCount = 0;
+
+// -----------------------------
+// Menu Navigation Variables
+enum MenuState {
+  MENU_SHT40,
+  MENU_BME280,
+  MENU_UV_SENSOR,
+  MENU_GEIGER,
+  MENU_TOTAL // Keeps track of total menu items
+};
+
+MenuState currentMenu = MENU_SHT40;
+
+// Debounce Variables
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 200; // milliseconds
+
+// -----------------------------
+// Sensor Data Variables (Global to save stack memory)
+float tempSHT40 = 0.0, humSHT40 = 0.0;
+float tempBME280 = 0.0, humBME280 = 0.0, presBME280 = 0.0;
+int uvRaw = 0;
+float uvIndex = 0.0;
+int joystickX = 0, joystickY = 0;
+bool switchPressed = false;
+
+// -----------------------------
+// LED Control Functions
+// -----------------------------
+
+/**
+ * Maps a sensor value to the number of LEDs to light up.
+ * @param value The current sensor reading.
+ * @param minVal The minimum expected sensor value.
+ * @param maxVal The maximum expected sensor value.
+ * @return Number of LEDs to light up (0-10).
+ */
+uint8_t mapToLEDs(float value, float minVal, float maxVal) {
+  if (value <= minVal) return 0;
+  if (value >= maxVal) return LED_COUNT;
+  float normalized = (value - minVal) / (maxVal - minVal);
+  return (uint8_t)(normalized * LED_COUNT);
+}
+
+/**
+ * Lights up a specific number of LEDs from left to right.
+ * @param count Number of LEDs to light up.
+ */
+void updateLEDs(uint8_t count) {
+  for (uint8_t i = 0; i < LED_COUNT; i++) {
+    if (i < count) {
+      digitalWrite(ledPins[i], HIGH);
+    } else {
+      digitalWrite(ledPins[i], LOW);
+    }
+  }
+}
+
+// -----------------------------
+// Setup Function
+// -----------------------------
+void setup() {
+  // Initialize Serial Monitor
+  Serial.begin(115200);
+  while (!Serial) { ; } // Wait for Serial Monitor to open
+  Serial.println(F("Initializing OLED, SHT40, BME280, Geiger Counter, and LEDs..."));
+
+  // Initialize LED Pins
+  for (uint8_t i = 0; i < LED_COUNT; i++) {
+    pinMode(ledPins[i], OUTPUT);
+    digitalWrite(ledPins[i], LOW); // Ensure LEDs are off initially
+  }
+
+  // Initialize OLED
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    errorMessages[errorCount++] = F("OLED Init Failed");
+  } else {
+    displayInitialized = true;
+    Serial.println(F("OLED initialized"));
+
+    // Clear the buffer
+    display.clearDisplay();
+
+    // Display startup message on OLED
+    display.setTextSize(1);             
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0,0);
+    display.println(F("Initializing SHT40..."));
+    display.display();
+    delay(1000);
+  }
+
+  // Initialize SHT40
+  if (!sht4.begin()) {
+    Serial.println(F("Failed to find SHT40 sensor!"));
+    if (errorCount < MAX_ERRORS) errorMessages[errorCount++] = F("SHT40 Init Failed");
+  } else {
+    sht40Initialized = true;
+    sht4.setPrecision(SHT4X_HIGH_PRECISION);
+    Serial.println(F("SHT40 initialized"));
+    if (displayInitialized) {
+      display.println(F("SHT40 Initialized"));
+      display.display();
+      delay(1000);
+    }
+  }
+
+  // Initialize BME280
+  if (!bme.begin()) { // Removed explicit address
+    Serial.println(F("BME280 initialization failed"));
+    if (displayInitialized) {
+      display.println(F("BME280 Init Failed"));
+      display.display();
+      delay(1000);
+    }
+    if (errorCount < MAX_ERRORS) errorMessages[errorCount++] = F("BME280 Init Failed");
+  } else {
+    bmeInitialized = true;
+    Serial.println(F("BME280 initialized"));
+    if (displayInitialized) {
+      display.println(F("BME280 Initialized"));
+      display.display();
+      delay(1000);
+    }
+  }
+
+  // Initialize Joystick Switch Pin
+  pinMode(JOYSTICK_SW_PIN, INPUT_PULLUP);
+
+  // Initialize Geiger Counter Pin
+  pinMode(GEIGER_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(GEIGER_PIN), geigerPulse, FALLING); // Interrupt on falling edge
+
+  // If there are any initialization errors, set flag to show them
+  if (errorCount > 0 && displayInitialized) {
+    showStartupErrors();
+  } else if (displayInitialized) {
+    // Show success message
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0,0);
+    display.println(F("All Sensors Ready"));
+    display.display();
+    delay(1000);
+  }
+}
+
+// -----------------------------
+// Geiger Pulse Interrupt Service Routine
+// -----------------------------
+void geigerPulse() {
+  geigerCounts++;
+}
+
+// -----------------------------
+// Loop Function
+// -----------------------------
+void loop() {
+  // Handle Menu Navigation
+  handleMenuNavigation();
+
+  // Display current menu screen
+  displayCurrentMenu();
+
+  // Update Geiger counts every geigerInterval
+  if (millis() - lastGeigerCountTime >= geigerInterval) {
+    lastGeigerCountTime = millis();
+    cps = (float)geigerCounts / (geigerInterval / 1000.0); // Counts per second
+    uSv = cps * 0.005; // Example conversion factor (adjust based on your sensor)
+    geigerCounts = 0;
+
+    // Display Geiger Counter Data
+    if (currentMenu == MENU_GEIGER && displayInitialized) {
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(0,0);
+      display.println(F("Geiger Counter:"));
+      display.print(F("CPS: "));
+      display.println(cps, 2);
+      display.print(F("uSv/h: "));
+      display.println(uSv, 2);
+      display.display();
+
+      // Map uSv/h to LEDs (Adjust min and max as needed)
+      uint8_t ledCount = mapToLEDs(uSv, 0.0, 10.0); // Example range: 0 to 10 uSv/h
+      updateLEDs(ledCount);
+    }
+
+    // Log to Serial
+    Serial.print(F("Geiger CPS: "));
+    Serial.print(cps, 2);
+    Serial.print(F(" | uSv/h: "));
+    Serial.println(uSv, 2);
+  }
+
+  // Delay to prevent rapid looping
+  delay(100);
+}
+
+// -----------------------------
+// Function Definitions
+// -----------------------------
+
+// Display any initialization errors on OLED
+void showStartupErrors() {
+  if (!displayInitialized) return;
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0,0);
+  display.println(F("Initialization Errors:"));
+  for (int i = 0; i < errorCount; i++) {
+    display.println(errorMessages[i]);
+    // Prevent text overflow
+    if (i >= (SCREEN_HEIGHT / 8) - 2) break; // Roughly, 8 pixels per line
+  }
+  display.display();
+  delay(5000); // Display errors for 5 seconds
+}
+
+// Display sensor read error on OLED and Serial
+void displaySensorReadError(const __FlashStringHelper* sensorName) {
+  if (!displayInitialized) return;
+
+  display.print(sensorName);
+  display.println(F(" Read Failed"));
+  Serial.print(sensorName);
+  Serial.println(F(" Read Failed"));
+}
+
+// Read temperature and humidity from SHT40
+bool readSHT40(float &tempOut, float &humOut) {
+  if (!sht40Initialized) return false;
+
+  sensors_event_t humidityEvent, tempEvent;
+  if (!sht4.getEvent(&humidityEvent, &tempEvent)) {
+    return false;
+  }
+  tempOut = tempEvent.temperature;
+  humOut = humidityEvent.relative_humidity;
+  return true;
+}
+
+// Read temperature, humidity, and pressure from BME280
+bool readBME280(float &tempOut, float &humOut, float &presOut) {
+  if (!bmeInitialized) return false;
+
+  tempOut = bme.readTemperature();
+  humOut = bme.readHumidity();
+  presOut = bme.readPressure() / 100.0F; // Convert Pa to hPa
+
+  // Simple validation
+  if (isnan(tempOut) || isnan(humOut) || isnan(presOut)) {
+    return false;
+  }
+
+  return true;
+}
+
+// Read UV sensor (Analog)
+int readUVSensor(bool &success) {
+  int uvRaw = analogRead(UV_SENSOR_PIN);
+  
+  // Example validation: Adjust based on your sensor's valid range
+  if (uvRaw < 0 || uvRaw > 1023) { 
+    success = false;
+  } else {
+    success = true;
+  }
+  return uvRaw;
+}
+
+// Read Joystick X-axis (Analog)
+int readJoystickX() {
+  return analogRead(JOYSTICK_X_PIN);
+}
+
+// Read Joystick Y-axis (Analog)
+int readJoystickY() {
+  return analogRead(JOYSTICK_Y_PIN);
+}
+
+// Read Joystick Switch (Digital)
+bool readJoystickSwitch() {
+  int buttonState = digitalRead(JOYSTICK_SW_PIN);
+  // Assuming LOW means pressed due to INPUT_PULLUP
+  return (buttonState == LOW);
+}
+
+// Handle Menu Navigation based on Joystick Input
+void handleMenuNavigation() {
+  int xVal = readJoystickX();
+  int yVal = readJoystickY();
+  bool switchPressedFlag = readJoystickSwitch();
+
+  unsigned long currentTime = millis();
+
+  // Detect Left Swipe
+  if (xVal < 300 && (currentTime - lastDebounceTime) > debounceDelay) {
+    currentMenu = (MenuState)((currentMenu - 1 + MENU_TOTAL) % MENU_TOTAL);
+    lastDebounceTime = currentTime;
+    delay(200); // Additional delay to prevent multiple triggers
+  }
+
+  // Detect Right Swipe
+  if (xVal > 700 && (currentTime - lastDebounceTime) > debounceDelay) {
+    currentMenu = (MenuState)((currentMenu + 1) % MENU_TOTAL);
+    lastDebounceTime = currentTime;
+    delay(200); // Additional delay to prevent multiple triggers
+  }
+
+  // Optional: Detect Switch Press to Reset Menu
+  if (switchPressedFlag && (currentTime - lastDebounceTime) > debounceDelay) {
+    currentMenu = MENU_SHT40;
+    lastDebounceTime = currentTime;
+    delay(200); // Additional delay to prevent multiple triggers
+  }
+}
+
+// Display Data Based on Current Menu
+void displayCurrentMenu() {
+  if (!displayInitialized) return;
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0,0);
+
+  switch (currentMenu) {
+    case MENU_SHT40:
+      displaySHT40();
+      break;
+    case MENU_BME280:
+      displayBME280();
+      break;
+    case MENU_UV_SENSOR:
+      displayUVSensor();
+      break;
+    case MENU_GEIGER:
+      displayGeiger();
+      break;
+    default:
+      display.setCursor(0,0);
+      display.println(F("Unknown Menu"));
+      break;
+  }
+
+  display.display();
+}
+
+// Display SHT40 Sensor Data
+void displaySHT40() {
+  float temp = 0.0, hum = 0.0;
+  bool success = readSHT40(temp, hum);
+
+  display.println(F("SHT40 Sensor:"));
+  if (success) {
+    display.print(F("Temp: "));
+    display.print(temp, 1); // One decimal place
+    display.println(F(" C"));
+    display.print(F("Humidity: "));
+    display.print(hum, 1); // One decimal place
+    display.println(F(" %"));
+
+    // Map temperature to LEDs (Adjust min and max as needed)
+    uint8_t ledCount = mapToLEDs(temp, 15.0, 35.0); // Example range: 15°C to 35°C
+    updateLEDs(ledCount);
+  } else {
+    displaySensorReadError(F("SHT40"));
+    updateLEDs(0); // Turn off LEDs on error
+  }
+}
+
+// Display BME280 Sensor Data
+void displayBME280() {
+  float temp = 0.0, hum = 0.0, pres = 0.0;
+  bool success = readBME280(temp, hum, pres);
+
+  display.println(F("BME280 Sensor:"));
+  if (success) {
+    display.print(F("Temp: "));
+    display.print(temp, 1); // One decimal place
+    display.println(F(" C"));
+    display.print(F("Pressure: "));
+    display.print(pres, 1); // One decimal place
+    display.println(F(" hPa"));
+    display.print(F("Humidity: "));
+    display.print(hum, 1); // One decimal place
+    display.println(F(" %"));
+
+    // Map pressure to LEDs (Adjust min and max as needed)
+    uint8_t ledCount = mapToLEDs(pres, 980.0, 1050.0); // Example range: 980 hPa to 1050 hPa
+    updateLEDs(ledCount);
+  } else {
+    displaySensorReadError(F("BME280"));
+    updateLEDs(0); // Turn off LEDs on error
+  }
+}
+
+// Display UV Sensor Data
+void displayUVSensor() {
+  bool success;
+  int uvRaw = readUVSensor(success);
+
+  display.println(F("UV Sensor:"));
+  if (success) {
+    display.print(F("Raw: "));
+    display.println(uvRaw);
+    float uvIndex = uvRaw * (15.0 / 1023.0); // Calibration needed
+    display.print(F("UV Index: "));
+    display.println(uvIndex, 2); // Two decimal places
+
+    // Map UV Index to LEDs (Adjust min and max as needed)
+    uint8_t ledCount = mapToLEDs(uvIndex, 0.0, 15.0); // Example range: 0 to 15 UV Index
+    updateLEDs(ledCount);
+  } else {
+    displaySensorReadError(F("UV"));
+    updateLEDs(0); // Turn off LEDs on error
+  }
+}
+
+// Display Geiger Counter Data
+void displayGeiger() {
+  display.println(F("Geiger Counter:"));
+  display.print(F("CPS: "));
+  display.println(cps, 2); // Counts per second
+  display.print(F("uSv/h: "));
+  display.println(uSv, 2); // Microsieverts per hour
+
+  // Map uSv/h to LEDs (Adjust min and max as needed)
+  uint8_t ledCount = mapToLEDs(uSv, 0.0, 10.0); // Example range: 0 to 10 uSv/h
+  updateLEDs(ledCount);
+}
